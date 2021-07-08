@@ -8,6 +8,7 @@ cfg_if::cfg_if! {
         use alloc::vec::Vec;
     }
 }
+use core::cmp::Ordering;
 use core::marker::PhantomData;
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
@@ -24,31 +25,31 @@ where
     pub fn raw_proof(&self) -> &MerkleProof<(T, T), M> {
         &self.raw_proof
     }
+
     /// Verify the `values` are all not in the tree, `None` means the `leaves` is not in the tree
     pub fn verify_exclusion(&self, root: &(T, T), leaves: &[(T, T)], values: &[T]) -> Option<bool> {
         if self.raw_proof.verify(root, leaves) {
             for value in values {
                 let mut excluded = false;
                 for (start_value, end_value) in leaves {
-                    if start_value < end_value {
+                    match start_value.cmp(end_value) {
                         // This is nomal range
-                        if value > start_value && value < end_value {
+                        Ordering::Less if value > start_value && value < end_value => {
                             excluded = true;
                             break;
                         }
-                    } else if start_value > end_value {
                         // This is the last special range
-                        if value < end_value || value > start_value {
+                        Ordering::Greater if value < end_value || value > start_value => {
                             excluded = true;
                             break;
                         }
-                    } else {
-                        debug_assert!(leaves.len() == 1);
                         // There is only one value in tree
-                        if value != start_value {
+                        Ordering::Equal if value != start_value => {
+                            debug_assert!(leaves.len() == 1);
                             excluded = true;
                             break;
                         }
+                        _ => {}
                     }
                 }
                 if !excluded {
