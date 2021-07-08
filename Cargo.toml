@@ -2,9 +2,19 @@
 name = "exclusion-merkle-cbt"
 version = "0.1.0"
 edition = "2018"
+license = "MIT"
+authors = ["TheWaWaR <thewawar@gmail.com>"]
 description = "Complete Binary Merkle Tree for verify exclusion"
+repository = "https://github.com/TheWaWaR/exclusion-merkle-cbt"
+keywords = ["merkle", "proof", "exclusion", "blacklist"]
+categories = ["algorithms", "data-structures"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 merkle-cbt = "0.3.0"
+cfg-if = "0.1"
+
+[features]
+default = ["std"]
+std = []
