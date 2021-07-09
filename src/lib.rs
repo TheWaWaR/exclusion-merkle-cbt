@@ -10,17 +10,18 @@ cfg_if::cfg_if! {
 }
 use core::cmp::Ordering;
 use core::marker::PhantomData;
+pub use merkle_cbt;
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
 /// Possible errors in the crate
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<T> {
+pub enum Error<K> {
     /// The proof is invalid
     InvalidProof,
     /// Key already included in tree
-    KeyIncluded(T),
+    KeyIncluded(K),
     /// Key not coverted in proof
-    KeyUnknown(T),
+    KeyUnknown(K),
 }
 
 pub type H256 = [u8; 32];
@@ -164,10 +165,10 @@ where
 
     /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
     ///
-    ///  * Ok(())                      => All keys are not in tree
-    ///  * Err(Error::InvalidProof)    => The proof don't match the root
-    ///  * Err(Error::KeyIncluded(T))  => Some keys are in tree
-    ///  * Err(Error::KeyUnknown(T))   => The proof is ok, but some keys not coverted in the range
+    ///  * `Ok(())`                    => All keys are not in tree
+    ///  * `Err(Error::InvalidProof)`  => The proof don't match the root
+    ///  * `Err(Error::KeyIncluded(K))`=> Some keys are in tree
+    ///  * `Err(Error::KeyUnknown(K))` => The proof is ok, but some keys not coverted in the range
     pub fn verify_exclusion<K, V, H>(
         &self,
         root: &H256,
