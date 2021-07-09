@@ -148,10 +148,10 @@ where
 
     /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
     ///
-    ///  Ok(true)                    => All keys are not in tree
-    ///  Ok(false)                   => Some keys are in tree
-    ///  Err(Error::InvalidProof)    => The proof don't match the root
-    ///  Err(Error::KeyUnknown(T))   => The proof is ok, but some keys not coverted in the range
+    ///  * Ok(true)                    => All keys are not in tree
+    ///  * Ok(false)                   => Some keys are in tree
+    ///  * Err(Error::InvalidProof)    => The proof don't match the root
+    ///  * Err(Error::KeyUnknown(T))   => The proof is ok, but some keys not coverted in the range
     pub fn verify_exclusion<K, V, H>(
         &self,
         root: &H256,
