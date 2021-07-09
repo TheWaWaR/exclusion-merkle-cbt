@@ -15,13 +15,13 @@ use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
 /// Possible errors in the crate
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error<K> {
+pub enum Error<'a, K> {
     /// The proof is invalid
     InvalidProof,
     /// Key already included in tree
-    KeyIncluded(K),
+    KeyIncluded(&'a K),
     /// Key not coverted in proof
-    KeyUnknown(K),
+    KeyUnknown(&'a K),
 }
 
 /// Type alias to `[u8; 32]`
@@ -166,18 +166,18 @@ where
     }
 
     // TODO: add verify exclusion example
-    /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
+    /// Verify the `excluded_keys` are all not in tree.
     ///
     ///  * `Ok(())`                    => All keys are not in tree
     ///  * `Err(Error::InvalidProof)`  => The proof don't match the root
     ///  * `Err(Error::KeyIncluded(K))`=> Some keys are in tree
     ///  * `Err(Error::KeyUnknown(K))` => The proof is ok, but some keys not coverted in the range
-    pub fn verify_exclusion<K, V, H>(
+    pub fn verify_exclusion<'a, K, V, H>(
         &self,
         root: &H256,
         range_leaves: &[RangeLeaf<K, V, H>],
-        keys: &[K],
-    ) -> Result<(), Error<K>>
+        excluded_keys: &'a [K],
+    ) -> Result<(), Error<'a, K>>
     where
         K: Ord + AsRef<[u8]> + Clone,
         V: AsRef<[u8]> + Default + Clone,
@@ -185,11 +185,11 @@ where
     {
         let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
         if self.raw_proof.verify(root, &leaf_hashes) {
-            for key in keys {
+            for key in excluded_keys {
                 let mut excluded = false;
                 for range_leaf in range_leaves {
                     if range_leaf.match_either_key(key) {
-                        return Err(Error::KeyIncluded(key.clone()));
+                        return Err(Error::KeyIncluded(key));
                     }
                     if range_leaf.match_range(key) {
                         excluded = true;
@@ -197,7 +197,7 @@ where
                     }
                 }
                 if !excluded {
-                    return Err(Error::KeyUnknown(key.clone()));
+                    return Err(Error::KeyUnknown(key));
                 }
             }
             Ok(())
@@ -395,21 +395,21 @@ mod tests {
         let excluded_keys: Vec<StrKey> = vec!["e"];
         assert_eq!(
             proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Err(Error::KeyIncluded("e"))
+            Err(Error::KeyIncluded(&"e"))
         );
 
         // "e","x" are in included keys
         let excluded_keys: Vec<StrKey> = vec!["e", "f", "x"];
         assert_eq!(
             proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Err(Error::KeyIncluded("e"))
+            Err(Error::KeyIncluded(&"e"))
         );
 
         // "c" is not in included keys, but the proof can not verify it
         let excluded_keys: Vec<StrKey> = vec!["c"];
         assert_eq!(
             proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Err(Error::KeyUnknown("c"))
+            Err(Error::KeyUnknown(&"c"))
         );
     }
 }
