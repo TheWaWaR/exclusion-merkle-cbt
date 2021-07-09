@@ -9,201 +9,374 @@ cfg_if::cfg_if! {
     }
 }
 use core::cmp::Ordering;
+use core::fmt::Debug;
 use core::marker::PhantomData;
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
-pub struct ExclusionMerkleProof<T, M> {
-    raw_proof: MerkleProof<(T, T), M>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error<T> {
+    /// The proof is invalid
+    InvalidProof,
+    /// Key not coverted in proof
+    KeyUnknown(T),
 }
 
-impl<T, M> ExclusionMerkleProof<T, M>
+pub type H256 = [u8; 32];
+
+/// Trait for customize hash function
+pub trait Hasher {
+    fn update(&mut self, data: &[u8]);
+    fn finish(self) -> H256;
+}
+
+/// The Leaf data
+#[derive(Debug, Clone)]
+pub struct Leaf<K, V> {
+    // For sort the leaves before build range leaves
+    key: K,
+    // If given, the data will be hashed in RangeLeaf.hash()
+    value: Option<V>,
+}
+
+impl<K, V> Leaf<K, V>
 where
-    T: Ord + Default + Clone,
-    M: Merge<Item = (T, T)>,
+    K: Ord + AsRef<[u8]> + Debug + Clone,
+    V: AsRef<[u8]> + Debug + Clone,
+{
+    pub fn new(key: K, value: Option<V>) -> Self {
+        Leaf { key, value }
+    }
+    pub fn new_with_key(key: K) -> Self {
+        Self::new(key, None)
+    }
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+    pub fn value(&self) -> Option<&V> {
+        self.value.as_ref()
+    }
+    pub fn to_range<H: Hasher + Default>(&self, next_leaf: &Self) -> RangeLeaf<K, V, H> {
+        RangeLeaf::new(self.key.clone(), next_leaf.key.clone(), self.value.clone())
+    }
+    pub fn into_range<H: Hasher + Default>(self, next_leaf: &Self) -> RangeLeaf<K, V, H> {
+        RangeLeaf::new(self.key, next_leaf.key.clone(), self.value)
+    }
+}
+
+#[derive(Debug)]
+pub struct RangeLeaf<K, V, H> {
+    key: K,
+    next_key: K,
+    value: Option<V>,
+    hash_type: PhantomData<H>,
+}
+
+impl<K, V, H> Clone for RangeLeaf<K, V, H>
+where
+    K: Ord + AsRef<[u8]> + Debug + Clone,
+    V: AsRef<[u8]> + Debug + Clone,
+    H: Hasher + Default,
+{
+    fn clone(&self) -> Self {
+        Self::new(self.key.clone(), self.next_key.clone(), self.value.clone())
+    }
+}
+
+impl<K, V, H> RangeLeaf<K, V, H>
+where
+    K: Ord + AsRef<[u8]> + Debug + Clone,
+    V: AsRef<[u8]> + Debug + Clone,
+    H: Hasher + Default,
+{
+    pub fn new(key: K, next_key: K, value: Option<V>) -> Self {
+        RangeLeaf {
+            key,
+            next_key,
+            value,
+            hash_type: PhantomData,
+        }
+    }
+    pub fn new_with_key_pair(key: K, next_key: K) -> Self {
+        Self::new(key, next_key, None)
+    }
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+    pub fn next_key(&self) -> &K {
+        &self.next_key
+    }
+    pub fn value(&self) -> Option<&V> {
+        self.value.as_ref()
+    }
+    pub fn match_either_key(&self, key: &K) -> bool {
+        &self.key == key || &self.next_key == key
+    }
+    pub fn match_range(&self, key: &K) -> bool {
+        match self.key.cmp(&self.next_key) {
+            // This is nomal range
+            Ordering::Less if key > &self.key && key < &self.next_key => true,
+            // This is the last special range
+            Ordering::Greater if key < &self.next_key || key > &self.key => true,
+            // There is only one value in tree
+            Ordering::Equal if key != &self.key => true,
+            _ => false,
+        }
+    }
+    pub fn hash(&self) -> H256 {
+        let mut hasher = H::default();
+        hasher.update(self.key.as_ref());
+        hasher.update(self.next_key.as_ref());
+        if let Some(value) = self.value.as_ref() {
+            hasher.update(value.as_ref());
+        }
+        hasher.finish()
+    }
+}
+
+pub struct ExclusionMerkleProof<M> {
+    raw_proof: MerkleProof<H256, M>,
+}
+
+impl<M> ExclusionMerkleProof<M>
+where
+    M: Merge<Item = H256>,
 {
     /// The underlying proof
-    pub fn raw_proof(&self) -> &MerkleProof<(T, T), M> {
+    pub fn raw_proof(&self) -> &MerkleProof<H256, M> {
         &self.raw_proof
     }
 
-    /// Verify the `values` are all not in the tree, `None` means the `leaves` is not in the tree
-    pub fn verify_exclusion(&self, root: &(T, T), leaves: &[(T, T)], values: &[T]) -> Option<bool> {
-        if self.raw_proof.verify(root, leaves) {
-            for value in values {
+    /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
+    ///
+    ///  Ok(true)                    => All keys are not in tree
+    ///  Ok(false)                   => Some keys are in tree
+    ///  Err(Error::InvalidProof)    => The proof don't match the root
+    ///  Err(Error::KeyUnknown(T))   => The proof is ok, but some keys not coverted in the range
+    pub fn verify_exclusion<K, V, H>(
+        &self,
+        root: &H256,
+        range_leaves: &[RangeLeaf<K, V, H>],
+        keys: &[K],
+    ) -> Result<bool, Error<K>>
+    where
+        K: Ord + AsRef<[u8]> + Debug + Clone,
+        V: AsRef<[u8]> + Debug + Clone,
+        H: Hasher + Default,
+    {
+        let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
+        if self.raw_proof.verify(root, &leaf_hashes) {
+            for key in keys {
                 let mut excluded = false;
-                for (start_value, end_value) in leaves {
-                    match start_value.cmp(end_value) {
-                        // This is nomal range
-                        Ordering::Less if value > start_value && value < end_value => {
-                            excluded = true;
-                            break;
-                        }
-                        // This is the last special range
-                        Ordering::Greater if value < end_value || value > start_value => {
-                            excluded = true;
-                            break;
-                        }
-                        // There is only one value in tree
-                        Ordering::Equal if value != start_value => {
-                            debug_assert!(leaves.len() == 1);
-                            excluded = true;
-                            break;
-                        }
-                        _ => {}
+                for range_leaf in range_leaves {
+                    if range_leaf.match_either_key(key) {
+                        return Ok(false);
+                    }
+                    if range_leaf.match_range(key) {
+                        excluded = true;
+                        break;
                     }
                 }
                 if !excluded {
-                    return Some(false);
+                    return Err(Error::KeyUnknown(key.clone()));
                 }
             }
-            Some(true)
+            Ok(true)
         } else {
-            None
+            Err(Error::InvalidProof)
         }
     }
 }
 
-impl<T, M> From<MerkleProof<(T, T), M>> for ExclusionMerkleProof<T, M> {
-    fn from(raw_proof: MerkleProof<(T, T), M>) -> Self {
+impl<M> From<MerkleProof<H256, M>> for ExclusionMerkleProof<M> {
+    fn from(raw_proof: MerkleProof<H256, M>) -> Self {
         Self { raw_proof }
     }
 }
-impl<T, M> From<ExclusionMerkleProof<T, M>> for MerkleProof<(T, T), M> {
-    fn from(proof: ExclusionMerkleProof<T, M>) -> Self {
+impl<M> From<ExclusionMerkleProof<M>> for MerkleProof<H256, M> {
+    fn from(proof: ExclusionMerkleProof<M>) -> Self {
         proof.raw_proof
     }
 }
 
 #[derive(Default)]
-pub struct ExclusionCMBT<T, M> {
-    data_type: PhantomData<T>,
+pub struct ExclusionCBMT<K, V, H, M> {
+    key_type: PhantomData<K>,
+    value_type: PhantomData<V>,
+    hash_type: PhantomData<H>,
     merge: PhantomData<M>,
 }
 
-impl<T, M> ExclusionCMBT<T, M>
+impl<K, V, H, M> ExclusionCBMT<K, V, H, M>
 where
-    T: Ord + Default + Clone,
-    M: Merge<Item = (T, T)>,
+    K: Ord + AsRef<[u8]> + Debug + Clone,
+    V: AsRef<[u8]> + Debug + Clone,
+    H: Hasher + Default,
+    M: Merge<Item = H256>,
 {
-    /// Map value leaves to range leaves
-    pub fn map_leaves(mut included_values: Vec<T>) -> Vec<(T, T)> {
-        if included_values.is_empty() {
+    /// Build range leaves by raw leaves
+    pub fn build_range_leaves(mut raw_leaves: Vec<Leaf<K, V>>) -> Vec<RangeLeaf<K, V, H>> {
+        if raw_leaves.is_empty() {
             return Vec::new();
         }
-        included_values.sort();
-        let mut real_leaves: Vec<(T, T)> = Vec::with_capacity(included_values.len());
-        for window in included_values.windows(2) {
-            real_leaves.push((window[0].clone(), window[1].clone()));
+        raw_leaves.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        let mut range_leaves: Vec<_> = Vec::with_capacity(raw_leaves.len());
+        for window in raw_leaves.windows(2) {
+            range_leaves.push(window[0].to_range(&window[1]));
         }
-        real_leaves.push((
-            included_values[included_values.len() - 1].clone(),
-            included_values[0].clone(),
-        ));
-        real_leaves
+        range_leaves.push(raw_leaves[raw_leaves.len() - 1].to_range(&raw_leaves[0]));
+        range_leaves
     }
 
-    pub fn build_merkle_root(included_values: &[T]) -> (T, T) {
-        if included_values.is_empty() {
+    pub fn build_merkle_root(raw_leaves: &[Leaf<K, V>]) -> H256 {
+        if raw_leaves.is_empty() {
             return Default::default();
         }
-        CBMT::<(T, T), M>::build_merkle_root(&Self::map_leaves(included_values.to_vec()))
+        let range_leaves = Self::build_range_leaves(raw_leaves.to_vec());
+        let range_leaf_hashes: Vec<_> = range_leaves.iter().map(RangeLeaf::hash).collect();
+        CBMT::<H256, M>::build_merkle_root(&range_leaf_hashes)
     }
 
-    pub fn build_merkle_tree(included_values: Vec<T>) -> MerkleTree<(T, T), M> {
-        CBMT::<(T, T), M>::build_merkle_tree(&Self::map_leaves(included_values))
+    pub fn build_merkle_tree(raw_leaves: Vec<Leaf<K, V>>) -> MerkleTree<H256, M> {
+        let range_leaves = Self::build_range_leaves(raw_leaves.to_vec());
+        let range_leaf_hashes: Vec<_> = range_leaves.iter().map(RangeLeaf::hash).collect();
+        CBMT::<H256, M>::build_merkle_tree(&range_leaf_hashes)
     }
 
     pub fn build_merkle_proof(
-        included_values: &[T],
+        raw_leaves: &[Leaf<K, V>],
         indices: &[u32],
-    ) -> Option<ExclusionMerkleProof<T, M>> {
-        Self::build_merkle_tree(included_values.to_vec())
+    ) -> Option<ExclusionMerkleProof<M>> {
+        Self::build_merkle_tree(raw_leaves.to_vec())
             .build_proof(indices)
             .map(Into::into)
     }
 }
 
+pub type SimpleValue = [u8; 0];
+pub type SimpleLeaf<K> = Leaf<K, SimpleValue>;
+pub type SimpleRangeLeaf<K, H> = RangeLeaf<K, SimpleValue, H>;
+pub type SimpleExclusionCBMT<K, H, M> = ExclusionCBMT<K, SimpleValue, H, M>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blake2b_rs::{Blake2b, Blake2bBuilder};
 
-    struct MergeI32 {}
+    pub struct Blake2bHasher(Blake2b);
 
-    impl Merge for MergeI32 {
-        type Item = (i32, i32);
-        fn merge(left: &Self::Item, right: &Self::Item) -> Self::Item {
-            (right.0.wrapping_sub(left.0), right.1.wrapping_sub(left.1))
+    const PERSONALIZATION: &[u8] = b"exclusioncbmtree";
+    impl Default for Blake2bHasher {
+        fn default() -> Self {
+            let blake2b = Blake2bBuilder::new(32).personal(PERSONALIZATION).build();
+            Blake2bHasher(blake2b)
         }
     }
 
-    type ExCBMTI32 = ExclusionCMBT<i32, MergeI32>;
+    impl Hasher for Blake2bHasher {
+        fn update(&mut self, data: &[u8]) {
+            self.0.update(data);
+        }
+        fn finish(self) -> H256 {
+            let mut hash = [0u8; 32];
+            self.0.finalize(&mut hash);
+            hash
+        }
+    }
+
+    struct MergeBlake2bH256 {}
+
+    impl Merge for MergeBlake2bH256 {
+        type Item = H256;
+        fn merge(left: &Self::Item, right: &Self::Item) -> Self::Item {
+            let mut hasher = Blake2bHasher::default();
+            hasher.update(left);
+            hasher.update(right);
+            hasher.finish()
+        }
+    }
+
+    type StrKey = &'static str;
+    type StrLeaf = SimpleLeaf<StrKey>;
+    type StrRangeLeaf = SimpleRangeLeaf<StrKey, Blake2bHasher>;
+    type StrExCBMT = SimpleExclusionCBMT<StrKey, Blake2bHasher, MergeBlake2bH256>;
 
     #[test]
     fn test_simple() {
-        let included_values: Vec<i32> = vec![2, 3, 5, 7, 11, 13];
-        let all_leaves = ExCBMTI32::map_leaves(included_values.clone());
-        let indices: Vec<u32> = vec![1, 3, 5];
-        let leaves: Vec<(i32, i32)> = indices
-            .iter()
-            .map(|index| all_leaves[*index as usize])
+        let all_leaves: Vec<StrLeaf> = vec!["b", "e", "g", "x"]
+            .into_iter()
+            .map(StrLeaf::new_with_key)
             .collect();
-        let root = ExCBMTI32::build_merkle_root(&included_values);
-        let proof: ExclusionMerkleProof<i32, _> =
-            ExCBMTI32::build_merkle_proof(&included_values, &indices).unwrap();
+        let all_range_leaves = StrExCBMT::build_range_leaves(all_leaves.clone());
+        // ["e", "x"] => [("e", "g"), ("x", "b")]
+        let indices: Vec<u32> = vec![1, 3];
+        let range_leaves: Vec<StrRangeLeaf> = indices
+            .iter()
+            .map(|index| all_range_leaves[*index as usize].clone())
+            .collect();
+        let root = StrExCBMT::build_merkle_root(&all_leaves);
+        let proof: ExclusionMerkleProof<MergeBlake2bH256> =
+            StrExCBMT::build_merkle_proof(&all_leaves, &indices).unwrap();
 
-        assert_eq!(leaves, vec![(3, 5), (7, 11), (13, 2)]);
-        let excluded_values: Vec<i32> = vec![
-            // 3 < x < 5 or 7 < x < 11
-            4, 8, 9, 10, // greater than 13
-            14, 15, 16, 66, 999, // less than 2
-            1, 0, -1, -999,
-        ];
         assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(true)
+            range_leaves
+                .iter()
+                .map(|l| (*l.key(), *l.next_key()))
+                .collect::<Vec<_>>(),
+            vec![("e", "g"), ("x", "b")]
         );
-        let excluded_values: Vec<i32> = vec![4];
+        let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
         assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(true)
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Ok(true)
         );
-        let excluded_values: Vec<i32> = vec![9, -999];
+        let excluded_keys: Vec<StrKey> = vec!["f"];
         assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(true)
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Ok(true)
+        );
+        let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
+        assert_eq!(
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Ok(true)
         );
 
         // Use invalid leaves to verify the proof
-        let invalid_leaves1: Vec<(i32, i32)> = vec![(2, 5), (7, 11), (13, 2)];
+        let invalid_leaves1: Vec<StrRangeLeaf> = vec![("b", "e"), ("e", "g"), ("x", "b")]
+            .into_iter()
+            .map(|(key, next_key)| StrRangeLeaf::new_with_key_pair(key, next_key))
+            .collect();
         assert_eq!(
-            proof.verify_exclusion(&root, &invalid_leaves1, &excluded_values),
-            None
+            proof.verify_exclusion(&root, &invalid_leaves1, &excluded_keys),
+            Err(Error::InvalidProof)
         );
-        let invalid_leaves2: Vec<(i32, i32)> = vec![(7, 11), (13, 2)];
+        let invalid_leaves2: Vec<StrRangeLeaf> = vec![("d", "g"), ("x", "b")]
+            .into_iter()
+            .map(|(key, next_key)| StrRangeLeaf::new_with_key_pair(key, next_key))
+            .collect();
         assert_eq!(
-            proof.verify_exclusion(&root, &invalid_leaves2, &excluded_values),
-            None
-        );
-
-        // 3 is in `included_values`
-        let excluded_values: Vec<i32> = vec![3];
-        assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(false)
-        );
-
-        // 3,5 are in `included_values`
-        let excluded_values: Vec<i32> = vec![3, 4, 5];
-        assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(false)
+            proof.verify_exclusion(&root, &invalid_leaves2, &excluded_keys),
+            Err(Error::InvalidProof)
         );
 
-        // 12 is not in `included_values`, but the proof can not verify it
-        let excluded_values: Vec<i32> = vec![12];
+        // "e" is in included keys
+        let excluded_keys: Vec<StrKey> = vec!["e"];
         assert_eq!(
-            proof.verify_exclusion(&root, &leaves, &excluded_values),
-            Some(false)
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Ok(false)
+        );
+
+        // "e","x" are in included keys
+        let excluded_keys: Vec<StrKey> = vec!["e", "f", "x"];
+        assert_eq!(
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Ok(false)
+        );
+
+        // "c" is not in included keys, but the proof can not verify it
+        let excluded_keys: Vec<StrKey> = vec!["c"];
+        assert_eq!(
+            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            Err(Error::KeyUnknown("c"))
         );
     }
 }
