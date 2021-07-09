@@ -24,8 +24,10 @@ pub enum Error<K> {
     KeyUnknown(K),
 }
 
+/// Type alias to `[u8; 32]`
 pub type H256 = [u8; 32];
 
+// TODO: add example blake2b hasher
 /// Trait for customize hash function
 pub trait Hasher {
     /// Update data into the hasher
@@ -163,6 +165,7 @@ where
         &self.raw_proof
     }
 
+    // TODO: add verify exclusion example
     /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
     ///
     ///  * `Ok(())`                    => All keys are not in tree
@@ -215,6 +218,7 @@ impl<M> From<ExclusionMerkleProof<M>> for MerkleProof<H256, M> {
     }
 }
 
+// TODO: add example to build proof
 /// A helper struct to build data structure for verifing the exclusion of keys
 ///
 ///  * range leaves
@@ -236,6 +240,7 @@ where
     H: Hasher + Default,
     M: Merge<Item = H256>,
 {
+    // TODO: explain how range leaf built
     /// Build range leaves by raw leaves
     pub fn build_range_leaves(mut raw_leaves: Vec<Leaf<K, V>>) -> Vec<RangeLeaf<K, V, H>> {
         if raw_leaves.is_empty() {
@@ -267,6 +272,7 @@ where
         CBMT::<H256, M>::build_merkle_tree(&range_leaf_hashes)
     }
 
+    // TODO: add build merkle proof example
     /// Build merkle proof
     pub fn build_merkle_proof(
         raw_leaves: &[Leaf<K, V>],
