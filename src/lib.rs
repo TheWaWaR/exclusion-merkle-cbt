@@ -12,6 +12,7 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
+/// Possible errors in the crate
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error<T> {
     /// The proof is invalid
@@ -26,7 +27,9 @@ pub type H256 = [u8; 32];
 
 /// Trait for customize hash function
 pub trait Hasher {
+    /// Update data into the hasher
     fn update(&mut self, data: &[u8]);
+    /// Finalize the hasher and return the hash
     fn finish(self) -> H256;
 }
 
@@ -36,45 +39,49 @@ pub struct Leaf<K, V> {
     // For sort the leaves before build range leaves
     key: K,
     // If given, the data will be hashed in RangeLeaf.hash()
-    value: Option<V>,
+    value: V,
 }
 
 impl<K, V> Leaf<K, V>
 where
     K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Default + Clone,
 {
-    pub fn new(key: K, value: Option<V>) -> Self {
+    pub fn new(key: K, value: V) -> Self {
         Leaf { key, value }
     }
     pub fn new_with_key(key: K) -> Self {
-        Self::new(key, None)
+        Self::new(key, Default::default())
     }
     pub fn key(&self) -> &K {
         &self.key
     }
-    pub fn value(&self) -> Option<&V> {
-        self.value.as_ref()
+    pub fn value(&self) -> &V {
+        &self.value
     }
+
+    /// Build a range leaf with next leaf
     pub fn to_range<H: Hasher + Default>(&self, next_leaf: &Self) -> RangeLeaf<K, V, H> {
         RangeLeaf::new(self.key.clone(), next_leaf.key.clone(), self.value.clone())
     }
+    /// Build a range leaf with next leaf
     pub fn into_range<H: Hasher + Default>(self, next_leaf: &Self) -> RangeLeaf<K, V, H> {
         RangeLeaf::new(self.key, next_leaf.key.clone(), self.value)
     }
 }
 
+/// The range leaf is generate by leaf
 pub struct RangeLeaf<K, V, H> {
     key: K,
     next_key: K,
-    value: Option<V>,
+    value: V,
     hash_type: PhantomData<H>,
 }
 
 impl<K, V, H> Clone for RangeLeaf<K, V, H>
 where
     K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Default + Clone,
     H: Hasher + Default,
 {
     fn clone(&self) -> Self {
@@ -85,10 +92,10 @@ where
 impl<K, V, H> RangeLeaf<K, V, H>
 where
     K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Default + Clone,
     H: Hasher + Default,
 {
-    pub fn new(key: K, next_key: K, value: Option<V>) -> Self {
+    pub fn new(key: K, next_key: K, value: V) -> Self {
         RangeLeaf {
             key,
             next_key,
@@ -97,7 +104,7 @@ where
         }
     }
     pub fn new_with_key_pair(key: K, next_key: K) -> Self {
-        Self::new(key, next_key, None)
+        Self::new(key, next_key, Default::default())
     }
     pub fn key(&self) -> &K {
         &self.key
@@ -105,12 +112,16 @@ where
     pub fn next_key(&self) -> &K {
         &self.next_key
     }
-    pub fn value(&self) -> Option<&V> {
-        self.value.as_ref()
+    pub fn value(&self) -> &V {
+        &self.value
     }
+
+    /// Check if the key is in tree
     pub fn match_either_key(&self, key: &K) -> bool {
         &self.key == key || &self.next_key == key
     }
+
+    /// Check if the key is in range
     pub fn match_range(&self, key: &K) -> bool {
         match self.key.cmp(&self.next_key) {
             // This is nomal range
@@ -122,17 +133,22 @@ where
             _ => false,
         }
     }
+
+    /// Hash all fields by order:
+    ///
+    /// 1. key
+    /// 2. next_key
+    /// 3. value
     pub fn hash(&self) -> H256 {
         let mut hasher = H::default();
         hasher.update(self.key.as_ref());
         hasher.update(self.next_key.as_ref());
-        if let Some(value) = self.value.as_ref() {
-            hasher.update(value.as_ref());
-        }
+        hasher.update(self.value.as_ref());
         hasher.finish()
     }
 }
 
+/// The proof wrapped MerkleProof to verify the exclusion of some keys
 pub struct ExclusionMerkleProof<M> {
     raw_proof: MerkleProof<H256, M>,
 }
@@ -160,7 +176,7 @@ where
     ) -> Result<(), Error<K>>
     where
         K: Ord + AsRef<[u8]> + Clone,
-        V: AsRef<[u8]> + Clone,
+        V: AsRef<[u8]> + Default + Clone,
         H: Hasher + Default,
     {
         let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
@@ -198,6 +214,12 @@ impl<M> From<ExclusionMerkleProof<M>> for MerkleProof<H256, M> {
     }
 }
 
+/// A helper struct to build data structure for verifing the exclusion of keys
+///
+///  * range leaves
+///  * merkle root
+///  * merkle tree
+///  * merkle proof
 #[derive(Default)]
 pub struct ExclusionCBMT<K, V, H, M> {
     key_type: PhantomData<K>,
@@ -209,7 +231,7 @@ pub struct ExclusionCBMT<K, V, H, M> {
 impl<K, V, H, M> ExclusionCBMT<K, V, H, M>
 where
     K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Default + Clone,
     H: Hasher + Default,
     M: Merge<Item = H256>,
 {
@@ -227,6 +249,7 @@ where
         range_leaves
     }
 
+    /// Build merkle root
     pub fn build_merkle_root(raw_leaves: &[Leaf<K, V>]) -> H256 {
         if raw_leaves.is_empty() {
             return Default::default();
@@ -236,12 +259,14 @@ where
         CBMT::<H256, M>::build_merkle_root(&range_leaf_hashes)
     }
 
+    /// Build merkle tree
     pub fn build_merkle_tree(raw_leaves: Vec<Leaf<K, V>>) -> MerkleTree<H256, M> {
         let range_leaves = Self::build_range_leaves(raw_leaves.to_vec());
         let range_leaf_hashes: Vec<_> = range_leaves.iter().map(RangeLeaf::hash).collect();
         CBMT::<H256, M>::build_merkle_tree(&range_leaf_hashes)
     }
 
+    /// Build merkle proof
     pub fn build_merkle_proof(
         raw_leaves: &[Leaf<K, V>],
         indices: &[u32],
@@ -252,9 +277,13 @@ where
     }
 }
 
+/// Simple empty Leaf value
 pub type SimpleValue = [u8; 0];
+/// Simple Leaf binded to SimpleValue
 pub type SimpleLeaf<K> = Leaf<K, SimpleValue>;
+/// Simple RangeLeaf binded to SimpleValue
 pub type SimpleRangeLeaf<K, H> = RangeLeaf<K, SimpleValue, H>;
+/// Simple ExclusionCBMT binded to SimpleValue
 pub type SimpleExclusionCBMT<K, H, M> = ExclusionCBMT<K, SimpleValue, H, M>;
 
 #[cfg(test)]
