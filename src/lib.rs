@@ -9,7 +9,6 @@ cfg_if::cfg_if! {
     }
 }
 use core::cmp::Ordering;
-use core::fmt::Debug;
 use core::marker::PhantomData;
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 
@@ -17,6 +16,8 @@ use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 pub enum Error<T> {
     /// The proof is invalid
     InvalidProof,
+    /// Key already included in tree
+    KeyIncluded(T),
     /// Key not coverted in proof
     KeyUnknown(T),
 }
@@ -30,7 +31,7 @@ pub trait Hasher {
 }
 
 /// The Leaf data
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Leaf<K, V> {
     // For sort the leaves before build range leaves
     key: K,
@@ -40,8 +41,8 @@ pub struct Leaf<K, V> {
 
 impl<K, V> Leaf<K, V>
 where
-    K: Ord + AsRef<[u8]> + Debug + Clone,
-    V: AsRef<[u8]> + Debug + Clone,
+    K: Ord + AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
 {
     pub fn new(key: K, value: Option<V>) -> Self {
         Leaf { key, value }
@@ -63,7 +64,6 @@ where
     }
 }
 
-#[derive(Debug)]
 pub struct RangeLeaf<K, V, H> {
     key: K,
     next_key: K,
@@ -73,8 +73,8 @@ pub struct RangeLeaf<K, V, H> {
 
 impl<K, V, H> Clone for RangeLeaf<K, V, H>
 where
-    K: Ord + AsRef<[u8]> + Debug + Clone,
-    V: AsRef<[u8]> + Debug + Clone,
+    K: Ord + AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
     H: Hasher + Default,
 {
     fn clone(&self) -> Self {
@@ -84,8 +84,8 @@ where
 
 impl<K, V, H> RangeLeaf<K, V, H>
 where
-    K: Ord + AsRef<[u8]> + Debug + Clone,
-    V: AsRef<[u8]> + Debug + Clone,
+    K: Ord + AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
     H: Hasher + Default,
 {
     pub fn new(key: K, next_key: K, value: Option<V>) -> Self {
@@ -148,19 +148,19 @@ where
 
     /// Verify the `keys` are all not in tree, `None` means the `leaves` is not in the tree.
     ///
-    ///  * Ok(true)                    => All keys are not in tree
-    ///  * Ok(false)                   => Some keys are in tree
+    ///  * Ok(())                      => All keys are not in tree
     ///  * Err(Error::InvalidProof)    => The proof don't match the root
+    ///  * Err(Error::KeyIncluded(T))  => Some keys are in tree
     ///  * Err(Error::KeyUnknown(T))   => The proof is ok, but some keys not coverted in the range
     pub fn verify_exclusion<K, V, H>(
         &self,
         root: &H256,
         range_leaves: &[RangeLeaf<K, V, H>],
         keys: &[K],
-    ) -> Result<bool, Error<K>>
+    ) -> Result<(), Error<K>>
     where
-        K: Ord + AsRef<[u8]> + Debug + Clone,
-        V: AsRef<[u8]> + Debug + Clone,
+        K: Ord + AsRef<[u8]> + Clone,
+        V: AsRef<[u8]> + Clone,
         H: Hasher + Default,
     {
         let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
@@ -169,7 +169,7 @@ where
                 let mut excluded = false;
                 for range_leaf in range_leaves {
                     if range_leaf.match_either_key(key) {
-                        return Ok(false);
+                        return Err(Error::KeyIncluded(key.clone()));
                     }
                     if range_leaf.match_range(key) {
                         excluded = true;
@@ -180,7 +180,7 @@ where
                     return Err(Error::KeyUnknown(key.clone()));
                 }
             }
-            Ok(true)
+            Ok(())
         } else {
             Err(Error::InvalidProof)
         }
@@ -208,8 +208,8 @@ pub struct ExclusionCBMT<K, V, H, M> {
 
 impl<K, V, H, M> ExclusionCBMT<K, V, H, M>
 where
-    K: Ord + AsRef<[u8]> + Debug + Clone,
-    V: AsRef<[u8]> + Debug + Clone,
+    K: Ord + AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
     H: Hasher + Default,
     M: Merge<Item = H256>,
 {
@@ -325,20 +325,17 @@ mod tests {
             vec![("e", "g"), ("x", "b")]
         );
         let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
-        assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Ok(true)
-        );
+        assert!(proof
+            .verify_exclusion(&root, &range_leaves, &excluded_keys)
+            .is_ok());
         let excluded_keys: Vec<StrKey> = vec!["f"];
-        assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Ok(true)
-        );
+        assert!(proof
+            .verify_exclusion(&root, &range_leaves, &excluded_keys)
+            .is_ok());
         let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
-        assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Ok(true)
-        );
+        assert!(proof
+            .verify_exclusion(&root, &range_leaves, &excluded_keys)
+            .is_ok());
 
         // Use invalid leaves to verify the proof
         let invalid_leaves1: Vec<StrRangeLeaf> = vec![("b", "e"), ("e", "g"), ("x", "b")]
@@ -362,14 +359,14 @@ mod tests {
         let excluded_keys: Vec<StrKey> = vec!["e"];
         assert_eq!(
             proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Ok(false)
+            Err(Error::KeyIncluded("e"))
         );
 
         // "e","x" are in included keys
         let excluded_keys: Vec<StrKey> = vec!["e", "f", "x"];
         assert_eq!(
             proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-            Ok(false)
+            Err(Error::KeyIncluded("e"))
         );
 
         // "c" is not in included keys, but the proof can not verify it

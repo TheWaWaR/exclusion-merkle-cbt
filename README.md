@@ -60,8 +60,7 @@ let proof: ExclusionMerkleProof<MergeBlake2bH256> =
     StrExCBMT::build_merkle_proof(&all_leaves, &indices).unwrap();
 
 let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
-assert_eq!(
-    proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
-    Ok(true)
-);
+assert!(proof
+    .verify_exclusion(&root, &range_leaves, &excluded_keys)
+    .is_ok());
 ```
