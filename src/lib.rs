@@ -49,8 +49,8 @@ pub struct Leaf<K, V> {
 
 impl<K, V> Leaf<K, V>
 where
-    K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Default + Clone,
+    K: AsRef<[u8]> + Clone + Ord,
+    V: AsRef<[u8]> + Clone + Default,
 {
     pub fn new(key: K, value: V) -> Self {
         Leaf { key, value }
@@ -85,8 +85,8 @@ pub struct RangeLeaf<K, V, H> {
 
 impl<K, V, H> Clone for RangeLeaf<K, V, H>
 where
-    K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Default + Clone,
+    K: AsRef<[u8]> + Clone + Ord,
+    V: AsRef<[u8]> + Clone + Default,
     H: Hasher + Default,
 {
     fn clone(&self) -> Self {
@@ -96,8 +96,8 @@ where
 
 impl<K, V, H> RangeLeaf<K, V, H>
 where
-    K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Default + Clone,
+    K: AsRef<[u8]> + Clone + Ord,
+    V: AsRef<[u8]> + Clone + Default,
     H: Hasher + Default,
 {
     pub fn new(key: K, next_key: K, value: V) -> Self {
@@ -181,8 +181,8 @@ where
         excluded_keys: &'a [K],
     ) -> Result<(), Error<'a, K>>
     where
-        K: Ord + AsRef<[u8]> + Clone,
-        V: AsRef<[u8]> + Default + Clone,
+        K: AsRef<[u8]> + Clone + Ord,
+        V: AsRef<[u8]> + Clone + Default,
         H: Hasher + Default,
     {
         let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
@@ -237,8 +237,8 @@ pub struct ExclusionCBMT<K, V, H, M> {
 
 impl<K, V, H, M> ExclusionCBMT<K, V, H, M>
 where
-    K: Ord + AsRef<[u8]> + Clone,
-    V: AsRef<[u8]> + Default + Clone,
+    K: AsRef<[u8]> + Clone + Ord,
+    V: AsRef<[u8]> + Clone + Default,
     H: Hasher + Default,
     M: Merge<Item = H256>,
 {
