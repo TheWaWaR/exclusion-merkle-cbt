@@ -376,15 +376,18 @@ mod tests {
     type StrKey = &'static str;
     type StrLeaf = SimpleLeaf<StrKey>;
     type StrRangeLeaf = SimpleRangeLeaf<StrKey, Blake2bHasher>;
+    // A helper to compute root and build proof
     type StrExCBMT = SimpleExclusionCBMT<StrKey, Blake2bHasher, MergeBlake2bH256>;
 
     #[test]
     fn test_simple() {
+        // Can be seen as a black list
         let all_leaves: Vec<StrLeaf> = vec!["b", "e", "g", "x"]
             .into_iter()
             .map(StrLeaf::new_with_key)
             .collect();
         let root = StrExCBMT::compute_root(&all_leaves);
+        // The keys not in the black list
         let excluded_keys = vec!["f", "y", "z", "a"];
         let (proof, range_leaves) = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
         assert_eq!(
