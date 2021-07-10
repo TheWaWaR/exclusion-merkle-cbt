@@ -16,6 +16,8 @@ use merkle_cbt::{merkle_tree::Merge, MerkleProof, MerkleTree, CBMT};
 /// Possible errors in the crate
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error<'a, K> {
+    /// Empty tree
+    EmptyTree,
     /// The proof is invalid
     InvalidProof,
     /// Key already included in tree
@@ -242,56 +244,96 @@ where
 {
     // TODO: explain how range leaf built
     /// Build range leaves by raw leaves
-    pub fn build_range_leaves(mut raw_leaves: Vec<Leaf<K, V>>) -> Vec<RangeLeaf<K, V, H>> {
+    pub fn build_range_leaves(raw_leaves: &[Leaf<K, V>]) -> Vec<RangeLeaf<K, V, H>> {
         if raw_leaves.is_empty() {
             return Vec::new();
         }
+        let mut raw_leaves: Vec<&Leaf<K, V>> = raw_leaves.iter().collect();
         raw_leaves.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         let mut range_leaves: Vec<_> = Vec::with_capacity(raw_leaves.len());
         for window in raw_leaves.windows(2) {
-            range_leaves.push(window[0].to_range(&window[1]));
+            range_leaves.push(window[0].to_range(window[1]));
         }
-        range_leaves.push(raw_leaves[raw_leaves.len() - 1].to_range(&raw_leaves[0]));
+        range_leaves.push(raw_leaves[raw_leaves.len() - 1].to_range(raw_leaves[0]));
         range_leaves
     }
 
     /// Build merkle root
-    pub fn build_merkle_root(raw_leaves: &[Leaf<K, V>]) -> H256 {
+    pub fn compute_root(raw_leaves: &[Leaf<K, V>]) -> H256 {
         if raw_leaves.is_empty() {
             return Default::default();
         }
-        let range_leaves = Self::build_range_leaves(raw_leaves.to_vec());
+        let range_leaves = Self::build_range_leaves(raw_leaves);
         let range_leaf_hashes: Vec<_> = range_leaves.iter().map(RangeLeaf::hash).collect();
         CBMT::<H256, M>::build_merkle_root(&range_leaf_hashes)
     }
 
     /// Build merkle tree
-    pub fn build_merkle_tree(raw_leaves: Vec<Leaf<K, V>>) -> MerkleTree<H256, M> {
-        let range_leaves = Self::build_range_leaves(raw_leaves.to_vec());
+    pub fn build_tree(raw_leaves: &[Leaf<K, V>]) -> MerkleTree<H256, M> {
+        let range_leaves = Self::build_range_leaves(raw_leaves);
         let range_leaf_hashes: Vec<_> = range_leaves.iter().map(RangeLeaf::hash).collect();
         CBMT::<H256, M>::build_merkle_tree(&range_leaf_hashes)
     }
 
+    /// Build proof by `excluded_keys`
+    pub fn build_proof<'a>(
+        raw_leaves: &[Leaf<K, V>],
+        excluded_keys: &'a [K],
+    ) -> Result<(ExclusionMerkleProof<M>, Vec<RangeLeaf<K, V, H>>), Error<'a, K>> {
+        if raw_leaves.is_empty() {
+            return Err(Error::EmptyTree);
+        }
+        let mut excluded_keys: Vec<&'a K> = excluded_keys.iter().collect();
+        excluded_keys.sort_unstable();
+        // Range leaves are sorted too
+        let range_leaves = Self::build_range_leaves(raw_leaves);
+        let mut excluded_index = 0;
+        let mut indices = Vec::new();
+        let mut required_range_leaves = Vec::new();
+        let match_last_range = excluded_keys[0] < &range_leaves[0].key;
+        for (idx, range_leaf) in range_leaves.into_iter().enumerate() {
+            let mut match_current_range = false;
+            while excluded_index < excluded_keys.len() {
+                let key = excluded_keys[excluded_index];
+                if range_leaf.match_range(key) {
+                    match_current_range = true;
+                } else if range_leaf.match_either_key(key) {
+                    return Err(Error::KeyIncluded(key));
+                } else if key > &range_leaf.next_key {
+                    break;
+                }
+                excluded_index += 1;
+            }
+            if match_current_range || ((idx == raw_leaves.len() - 1) && match_last_range) {
+                indices.push(idx as u32);
+                required_range_leaves.push(range_leaf);
+            }
+        }
+        Self::build_proof_by_indices(raw_leaves, &indices)
+            .map(|proof| (proof, required_range_leaves))
+    }
+
     // TODO: add build merkle proof example
     /// Build merkle proof
-    pub fn build_merkle_proof(
+    pub fn build_proof_by_indices<'a>(
         raw_leaves: &[Leaf<K, V>],
         indices: &[u32],
-    ) -> Option<ExclusionMerkleProof<M>> {
-        Self::build_merkle_tree(raw_leaves.to_vec())
+    ) -> Result<ExclusionMerkleProof<M>, Error<'a, K>> {
+        Self::build_tree(raw_leaves)
             .build_proof(indices)
             .map(Into::into)
+            .ok_or(Error::EmptyTree)
     }
 }
 
-/// Simple empty Leaf value
-pub type SimpleValue = [u8; 0];
-/// Simple Leaf binded to SimpleValue
-pub type SimpleLeaf<K> = Leaf<K, SimpleValue>;
-/// Simple RangeLeaf binded to SimpleValue
-pub type SimpleRangeLeaf<K, H> = RangeLeaf<K, SimpleValue, H>;
-/// Simple ExclusionCBMT binded to SimpleValue
-pub type SimpleExclusionCBMT<K, H, M> = ExclusionCBMT<K, SimpleValue, H, M>;
+/// Empty Leaf value
+pub type EmptyValue = [u8; 0];
+/// Simple Leaf binded to EmptyValue
+pub type SimpleLeaf<K> = Leaf<K, EmptyValue>;
+/// Simple RangeLeaf binded to EmptyValue
+pub type SimpleRangeLeaf<K, H> = RangeLeaf<K, EmptyValue, H>;
+/// Simple ExclusionCBMT binded to EmptyValue
+pub type SimpleExclusionCBMT<K, H, M> = ExclusionCBMT<K, EmptyValue, H, M>;
 
 #[cfg(test)]
 mod tests {
@@ -342,16 +384,37 @@ mod tests {
             .into_iter()
             .map(StrLeaf::new_with_key)
             .collect();
-        let all_range_leaves = StrExCBMT::build_range_leaves(all_leaves.clone());
+        let root = StrExCBMT::compute_root(&all_leaves);
+        let excluded_keys = vec!["f", "y", "z", "a"];
+        let (proof, range_leaves) = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
+        assert_eq!(
+            range_leaves
+                .iter()
+                .map(|l| (*l.key(), *l.next_key()))
+                .collect::<Vec<_>>(),
+            vec![("e", "g"), ("x", "b")]
+        );
+        assert!(proof
+            .verify_exclusion(&root, &range_leaves, &excluded_keys)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_build_by_indices() {
+        let all_leaves: Vec<StrLeaf> = vec!["b", "e", "g", "x"]
+            .into_iter()
+            .map(StrLeaf::new_with_key)
+            .collect();
+        let all_range_leaves = StrExCBMT::build_range_leaves(&all_leaves);
         // ["e", "x"] => [("e", "g"), ("x", "b")]
         let indices: Vec<u32> = vec![1, 3];
         let range_leaves: Vec<StrRangeLeaf> = indices
             .iter()
             .map(|index| all_range_leaves[*index as usize].clone())
             .collect();
-        let root = StrExCBMT::build_merkle_root(&all_leaves);
+        let root = StrExCBMT::compute_root(&all_leaves);
         let proof: ExclusionMerkleProof<MergeBlake2bH256> =
-            StrExCBMT::build_merkle_proof(&all_leaves, &indices).unwrap();
+            StrExCBMT::build_proof_by_indices(&all_leaves, &indices).unwrap();
 
         assert_eq!(
             range_leaves
