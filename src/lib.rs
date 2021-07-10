@@ -154,37 +154,39 @@ where
 }
 
 /// The proof wrapped MerkleProof to verify the exclusion of some keys
-pub struct ExclusionMerkleProof<M> {
+pub struct ExclusionMerkleProof<K, V, H, M> {
     raw_proof: MerkleProof<H256, M>,
+    range_leaves: Vec<RangeLeaf<K, V, H>>,
 }
 
-impl<M> ExclusionMerkleProof<M>
+impl<K, V, H, M> ExclusionMerkleProof<K, V, H, M>
 where
+    K: AsRef<[u8]> + Clone + Ord,
+    V: AsRef<[u8]> + Clone + Default,
+    H: Hasher + Default,
     M: Merge<Item = H256>,
 {
+    pub fn new(raw_proof: MerkleProof<H256, M>, range_leaves: Vec<RangeLeaf<K, V, H>>) -> Self {
+        Self {
+            raw_proof,
+            range_leaves,
+        }
+    }
+
     /// The underlying proof
     pub fn raw_proof(&self) -> &MerkleProof<H256, M> {
         &self.raw_proof
     }
+    pub fn range_leaves(&self) -> &[RangeLeaf<K, V, H>] {
+        &self.range_leaves
+    }
 
-    // TODO: add verify exclusion example
-    /// Verify the `excluded_keys` are all not in tree.
-    ///
-    ///  * `Ok(())`                    => All keys are not in tree
-    ///  * `Err(Error::InvalidProof)`  => The proof don't match the root
-    ///  * `Err(Error::KeyIncluded(K))`=> Some keys are in tree
-    ///  * `Err(Error::KeyUnknown(K))` => The proof is ok, but some keys not coverted in the range
-    pub fn verify_exclusion<'a, K, V, H>(
+    pub fn verify_exclusion_with_ranges<'a>(
         &self,
         root: &H256,
         range_leaves: &[RangeLeaf<K, V, H>],
         excluded_keys: &'a [K],
-    ) -> Result<(), Error<'a, K>>
-    where
-        K: AsRef<[u8]> + Clone + Ord,
-        V: AsRef<[u8]> + Clone + Default,
-        H: Hasher + Default,
-    {
+    ) -> Result<(), Error<'a, K>> {
         let leaf_hashes: Vec<H256> = range_leaves.iter().map(RangeLeaf::hash).collect();
         if self.raw_proof.verify(root, &leaf_hashes) {
             for key in excluded_keys {
@@ -207,16 +209,28 @@ where
             Err(Error::InvalidProof)
         }
     }
-}
 
-impl<M> From<MerkleProof<H256, M>> for ExclusionMerkleProof<M> {
-    fn from(raw_proof: MerkleProof<H256, M>) -> Self {
-        Self { raw_proof }
+    // TODO: add verify exclusion example
+    /// Verify the `excluded_keys` are all not in tree.
+    ///
+    ///  * `Ok(())`                    => All keys are not in tree
+    ///  * `Err(Error::InvalidProof)`  => The proof don't match the root
+    ///  * `Err(Error::KeyIncluded(K))`=> Some keys are in tree
+    ///  * `Err(Error::KeyUnknown(K))` => The proof is ok, but some keys not coverted in the range
+    pub fn verify_exclusion<'a>(
+        &self,
+        root: &H256,
+        excluded_keys: &'a [K],
+    ) -> Result<(), Error<'a, K>> {
+        self.verify_exclusion_with_ranges(root, &self.range_leaves, excluded_keys)
     }
 }
-impl<M> From<ExclusionMerkleProof<M>> for MerkleProof<H256, M> {
-    fn from(proof: ExclusionMerkleProof<M>) -> Self {
-        proof.raw_proof
+
+impl<K, V, H, M> From<ExclusionMerkleProof<K, V, H, M>>
+    for (MerkleProof<H256, M>, Vec<RangeLeaf<K, V, H>>)
+{
+    fn from(proof: ExclusionMerkleProof<K, V, H, M>) -> Self {
+        (proof.raw_proof, proof.range_leaves)
     }
 }
 
@@ -279,7 +293,7 @@ where
     pub fn build_proof<'a>(
         raw_leaves: &[Leaf<K, V>],
         excluded_keys: &'a [K],
-    ) -> Result<(ExclusionMerkleProof<M>, Vec<RangeLeaf<K, V, H>>), Error<'a, K>> {
+    ) -> Result<ExclusionMerkleProof<K, V, H, M>, Error<'a, K>> {
         if raw_leaves.is_empty() {
             return Err(Error::EmptyTree);
         }
@@ -309,8 +323,7 @@ where
                 required_range_leaves.push(range_leaf);
             }
         }
-        Self::build_proof_by_indices(raw_leaves, &indices)
-            .map(|proof| (proof, required_range_leaves))
+        Self::build_proof_by_indices(raw_leaves, &indices, required_range_leaves)
     }
 
     // TODO: add build merkle proof example
@@ -318,11 +331,13 @@ where
     pub fn build_proof_by_indices<'a>(
         raw_leaves: &[Leaf<K, V>],
         indices: &[u32],
-    ) -> Result<ExclusionMerkleProof<M>, Error<'a, K>> {
-        Self::build_tree(raw_leaves)
+        range_leaves: Vec<RangeLeaf<K, V, H>>,
+    ) -> Result<ExclusionMerkleProof<K, V, H, M>, Error<'a, K>> {
+        let raw_proof = Self::build_tree(raw_leaves)
             .build_proof(indices)
             .map(Into::into)
-            .ok_or(Error::EmptyTree)
+            .ok_or(Error::EmptyTree)?;
+        Ok(ExclusionMerkleProof::new(raw_proof, range_leaves))
     }
 }
 
@@ -389,17 +404,16 @@ mod tests {
         let root = StrExCBMT::compute_root(&all_leaves);
         // The keys not in the black list
         let excluded_keys = vec!["f", "y", "z", "a"];
-        let (proof, range_leaves) = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
+        let proof = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
         assert_eq!(
-            range_leaves
+            proof
+                .range_leaves()
                 .iter()
                 .map(|l| (*l.key(), *l.next_key()))
                 .collect::<Vec<_>>(),
             vec![("e", "g"), ("x", "b")]
         );
-        assert!(proof
-            .verify_exclusion(&root, &range_leaves, &excluded_keys)
-            .is_ok());
+        assert!(proof.verify_exclusion(&root, &excluded_keys).is_ok());
     }
 
     #[test]
@@ -416,8 +430,8 @@ mod tests {
             .map(|index| all_range_leaves[*index as usize].clone())
             .collect();
         let root = StrExCBMT::compute_root(&all_leaves);
-        let proof: ExclusionMerkleProof<MergeBlake2bH256> =
-            StrExCBMT::build_proof_by_indices(&all_leaves, &indices).unwrap();
+        let proof: ExclusionMerkleProof<StrKey, EmptyValue, Blake2bHasher, MergeBlake2bH256> =
+            StrExCBMT::build_proof_by_indices(&all_leaves, &indices, range_leaves.clone()).unwrap();
 
         assert_eq!(
             range_leaves
@@ -427,17 +441,11 @@ mod tests {
             vec![("e", "g"), ("x", "b")]
         );
         let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
-        assert!(proof
-            .verify_exclusion(&root, &range_leaves, &excluded_keys)
-            .is_ok());
+        assert!(proof.verify_exclusion(&root, &excluded_keys).is_ok());
         let excluded_keys: Vec<StrKey> = vec!["f"];
-        assert!(proof
-            .verify_exclusion(&root, &range_leaves, &excluded_keys)
-            .is_ok());
+        assert!(proof.verify_exclusion(&root, &excluded_keys).is_ok());
         let excluded_keys: Vec<StrKey> = vec!["f", "y", "z", "a"];
-        assert!(proof
-            .verify_exclusion(&root, &range_leaves, &excluded_keys)
-            .is_ok());
+        assert!(proof.verify_exclusion(&root, &excluded_keys).is_ok());
 
         // Use invalid leaves to verify the proof
         let invalid_leaves1: Vec<StrRangeLeaf> = vec![("b", "e"), ("e", "g"), ("x", "b")]
@@ -445,7 +453,7 @@ mod tests {
             .map(|(key, next_key)| StrRangeLeaf::new_with_key_pair(key, next_key))
             .collect();
         assert_eq!(
-            proof.verify_exclusion(&root, &invalid_leaves1, &excluded_keys),
+            proof.verify_exclusion_with_ranges(&root, &invalid_leaves1, &excluded_keys),
             Err(Error::InvalidProof)
         );
         let invalid_leaves2: Vec<StrRangeLeaf> = vec![("d", "g"), ("x", "b")]
@@ -453,28 +461,28 @@ mod tests {
             .map(|(key, next_key)| StrRangeLeaf::new_with_key_pair(key, next_key))
             .collect();
         assert_eq!(
-            proof.verify_exclusion(&root, &invalid_leaves2, &excluded_keys),
+            proof.verify_exclusion_with_ranges(&root, &invalid_leaves2, &excluded_keys),
             Err(Error::InvalidProof)
         );
 
         // "e" is in included keys
         let excluded_keys: Vec<StrKey> = vec!["e"];
         assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            proof.verify_exclusion(&root, &excluded_keys),
             Err(Error::KeyIncluded(&"e"))
         );
 
         // "e","x" are in included keys
         let excluded_keys: Vec<StrKey> = vec!["e", "f", "x"];
         assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            proof.verify_exclusion(&root, &excluded_keys),
             Err(Error::KeyIncluded(&"e"))
         );
 
         // "c" is not in included keys, but the proof can not verify it
         let excluded_keys: Vec<StrKey> = vec!["c"];
         assert_eq!(
-            proof.verify_exclusion(&root, &range_leaves, &excluded_keys),
+            proof.verify_exclusion(&root, &excluded_keys),
             Err(Error::KeyUnknown(&"c"))
         );
     }

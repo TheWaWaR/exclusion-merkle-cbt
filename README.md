@@ -18,15 +18,16 @@ let all_leaves: Vec<StrLeaf> = vec!["b", "e", "g", "x"]
 let root = StrExCBMT::compute_root(&all_leaves);
 // The keys not in the black list
 let excluded_keys = vec!["f", "y", "z", "a"];
-let (proof, range_leaves) = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
+let proof = StrExCBMT::build_proof(&all_leaves, &excluded_keys).unwrap();
 assert_eq!(
-    range_leaves
+    proof
+        .range_leaves()
         .iter()
         .map(|l| (*l.key(), *l.next_key()))
         .collect::<Vec<_>>(),
     vec![("e", "g"), ("x", "b")]
 );
 assert!(proof
-    .verify_exclusion(&root, &range_leaves, &excluded_keys)
+    .verify_exclusion(&root, &excluded_keys)
     .is_ok());
 ```
